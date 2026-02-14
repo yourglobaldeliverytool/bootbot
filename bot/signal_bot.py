@@ -28,76 +28,71 @@ from bot.core.price_manager import PriceManager
 
 
 class Mode:
-    """Operating modes for the signal bot."""
     VERIFIED_TEST = "VERIFIED_TEST"
     LIVE_SIGNAL = "LIVE_SIGNAL"
 
 
 class SignalBot:
     """
-    Production-grade Telegram signal bot with:
-    - Automatic mode detection
-    - Multi-source price verification (NO BINANCE)
-    - Dynamic confidence calculation
-    - Professional Telegram messaging
-    - Railway deployment ready
-    - MUST halt without verified live data
+    Production-grade Telegram signal bot.
+    Key fixes:
+     - logger is initialized early to avoid AttributeError in _load_config
+     - connector.connect() and notifier.send_notification() auto-await when coroutine
+     - non-blocking background run when started from FastAPI
     """
-    
+
     def __init__(self, config_path: str = "bot/config/config.yaml"):
-        """Initialize the signal bot."""
-        # Load configuration
+        # Ensure a logger exists immediately so _load_config can log safely
+        self.logger = setup_logger("APEX_SIGNAL", "INFO")
+
+        # Load configuration (safe: _load_config uses self.logger now)
         self.config = self._load_config(config_path)
-        
+
+        # Reconfigure logger to user-configured level if present
+        log_level = self.config.get("logging", {}).get("level", "INFO")
+        self.logger = setup_logger("APEX_SIGNAL", log_level)
+
         # Load environment variables (Railway)
         self.env_loader = get_env_loader()
-        
+
         # Detect operating mode
         self.mode = self._detect_mode()
-        
-        # Setup logging
-        log_level = self.config.get('logging', {}).get('level', 'INFO')
-        self.logger = setup_logger("APEX_SIGNAL", log_level)
-        
+
         # Bot state
         self.is_running = False
-        self.start_time = None
-        self.last_signal_time = None
+        self.start_time: Optional[datetime] = None
+        self.last_signal_time: Optional[datetime] = None
         self.heartbeat_count = 0
         self.signal_count = 0
-        self.daily_signals = []
-        
+        self.daily_signals: List[Dict[str, Any]] = []
+
         # Capital management - from environment (Railway) with config fallback
-        # Default CAPITAL = 50 per requirements
         self.capital = self.env_loader.get_capital()
         self.risk_per_trade = self.env_loader.get_risk_per_trade()
-        
+
         # Initialize components
-        self.connector = None
-        self.price_manager = None
-        self.telegram_notifier = None
-        self.strategies = {}
-        self.indicators = {}
-        
+        self.connector: Optional[MultiSourceConnector] = None
+        self.price_manager: Optional[PriceManager] = None
+        self.telegram_notifier: Optional[TelegramNotifier] = None
+        self.strategies: Dict[str, Any] = {}
+        self.indicators: Dict[str, Any] = {}
+
         # Initialize registries (use singleton pattern)
-        BaseRegistry.reset()  # Reset for clean state
+        BaseRegistry.reset()
         self.strategy_registry = StrategyRegistry.get_instance()
         self.indicator_registry = IndicatorRegistry.get_instance()
-        
-        # Signal history
-        self.signal_history: List[Dict[str, Any]] = []
-        
+
         # Health check endpoint
-        self.healthy = True
-        
+        self.healthy = False
+
         # Data source monitoring
         self.data_source_connected = False
-        self.last_data_check = None
-        
+        self.last_data_check: Optional[datetime] = None
+
         # Notification state
         self.daily_summary_sent = False
-        self.last_summary_time = None
-        
+        self.last_summary_time: Optional[datetime] = None
+
         self.logger.warning("=" * 70)
         self.logger.warning("🚀 APEX SIGNAL™ BOT INITIALIZING")
         self.logger.warning("=" * 70)
@@ -105,152 +100,159 @@ class SignalBot:
         self.logger.warning(f"Capital: ${self.capital:.2f}")
         self.logger.warning(f"Risk per trade: {self.risk_per_trade:.1%}")
         self.logger.warning("=" * 70)
-    
+
     def _load_config(self, config_path: str) -> Dict[str, Any]:
-        """Load configuration from YAML file."""
+        """Load configuration from YAML file. Safe: uses self.logger which exists."""
         try:
             config_file = Path(config_path)
             if config_file.exists():
-                with open(config_file, 'r') as f:
-                    config = yaml.safe_load(f)
-                return config or {}
+                with open(config_file, "r") as f:
+                    cfg = yaml.safe_load(f)
+                return cfg or {}
             else:
+                # config file missing is not fatal here; return empty dict
                 self.logger.warning(f"Config file not found: {config_path}")
                 return {}
         except Exception as e:
-            self.logger.error(f"Error loading config: {e}")
+            # In case of parse error, return empty config and log error
+            self.logger.error(f"Error loading config {config_path}: {e}")
             return {}
-    
+
     def _detect_mode(self) -> str:
-        """
-        Automatically detect operating mode based on environment.
-        LIVE_SIGNAL mode activates if Telegram credentials are present.
-        """
-        telegram_token = os.environ.get('TELEGRAM_BOT_TOKEN')
-        telegram_chat_id = os.environ.get('TELEGRAM_CHAT_ID')
-        
+        telegram_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+        telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
         if telegram_token and telegram_chat_id:
             return Mode.LIVE_SIGNAL
-        else:
-            return Mode.VERIFIED_TEST
-    
+        return Mode.VERIFIED_TEST
+
     async def initialize(self) -> bool:
-        """Initialize all bot components."""
+        """Initialize all bot components. Returns True if ready to run."""
         try:
             self.logger.info("🔧 Initializing bot components...")
-            
-            # Initialize data connector
+
+            # Initialize data connector (support sync or async connect())
             self.connector = MultiSourceConnector()
-            if not self.connector.connect():
+
+            try:
+                conn_res = self.connector.connect()
+                if asyncio.iscoroutine(conn_res):
+                    connected = await conn_res
+                else:
+                    connected = bool(conn_res)
+            except Exception as e:
+                self.logger.error(f"Connector.connect() failed: {e}", exc_info=True)
+                connected = False
+
+            if not connected:
                 self.logger.error("❌ Failed to connect to data sources")
                 self.logger.error("❌ BOT CANNOT OPERATE WITHOUT LIVE DATA")
+                self.healthy = False
                 return False
-            
+
             self.data_source_connected = True
             self.last_data_check = datetime.utcnow()
             self.logger.info("✅ Data connector connected")
-            
-            # Initialize price manager with 10s cache
-            self.price_manager = PriceManager(self.connector, cache_ttl=10)
-            self.logger.info("✅ Price manager initialized with 10s cache")
-            
-            # Initialize Telegram notifier
+
+            # Initialize price manager with cache TTL (sync class assumed)
+            self.price_manager = PriceManager(self.connector, cache_ttl=self.config.get("price_cache_ttl", 10))
+            self.logger.info("✅ Price manager initialized with cache TTL")
+
+            # Initialize Telegram notifier (compat factory)
             if self.mode == Mode.LIVE_SIGNAL:
-                token = os.environ.get('TELEGRAM_BOT_TOKEN')
-                chat_id = os.environ.get('TELEGRAM_CHAT_ID')
-                
+                token = os.environ.get("TELEGRAM_BOT_TOKEN")
+                chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+
                 if token and chat_id:
-                    notifier_config = {
-                        'bot_token': token,
-                        'chat_id': chat_id
-                    }
-                    self.telegram_notifier = TelegramNotifier(notifier_config)
+                    self.telegram_notifier = TelegramNotifier(token=token, chat_id=chat_id)
                     self.logger.info("✅ Telegram notifier initialized (LIVE mode)")
-                    
-                    # Send startup notification
+                    # send startup notification (may be sync or async)
                     await self._send_startup_notification()
                 else:
                     self.logger.error("❌ TELEGRAM CREDENTIALS MISSING IN LIVE MODE")
                     self.logger.error("❌ BOT WILL HALT")
+                    self.healthy = False
                     return False
             else:
-                self.logger.info("✅ Running in VERIFIED_TEST mode (no real Telegram messages)")
-            
+                self.logger.info("✅ Running in VERIFIED_TEST mode (no live Telegram sends)")
+
             # Load strategies and indicators
             await self._load_strategies_and_indicators()
-            
+
             self.is_running = True
             self.start_time = datetime.utcnow()
             self.healthy = True
-            
-            # Send live feed connected notification
+
+            # Send feed connected notification (non-blocking)
             await self._send_feed_connected_notification()
-            
+
             return True
-            
+
         except Exception as e:
-            self.logger.error(f"❌ Initialization failed: {e}")
+            self.logger.error(f"❌ Initialization failed: {e}", exc_info=True)
             self.healthy = False
             return False
-    
+
     async def _load_strategies_and_indicators(self) -> None:
-        """Load all strategies and indicators from all modules."""
-        # Load all indicators
+        """Load strategies and indicators via registries and apply config settings."""
+        # Use registry objects (these methods should exist in your repo)
         self.indicator_registry = IndicatorRegistry()
-        indicator_count = self.indicator_registry.load_all_indicators()
-        self.logger.info(f"✅ Loaded {indicator_count} indicators")
-        
-        # Load all strategies
+        indicator_count = 0
+        try:
+            indicator_count = self.indicator_registry.load_all_indicators()
+        except Exception:
+            self.logger.exception("Failed loading indicators (continuing if partial)")
+
+        self.logger.info(f"✅ Indicators discovered: {indicator_count}")
+
         self.strategy_registry = StrategyRegistry()
-        strategy_count = self.strategy_registry.load_all_strategies()
-        self.logger.info(f"✅ Loaded {strategy_count} strategies")
-        
-        # CRITICAL: Fail if no strategies loaded
+        strategy_count = 0
+        try:
+            strategy_count = self.strategy_registry.load_all_strategies()
+        except Exception:
+            self.logger.exception("Failed loading strategies (continuing if partial)")
+
+        self.logger.info(f"✅ Strategies discovered: {strategy_count}")
+
         if strategy_count == 0:
             self.logger.error("❌ CRITICAL: No strategies loaded from registry")
             raise RuntimeError("No strategies loaded - cannot operate without strategies")
-        
-        # Initialize active strategies from config
-        strategies_config = self.config.get('strategies', {})
+
+        # Activate strategies configured in config (preserve your approach)
+        strategies_config = self.config.get("strategies", {})
         active_count = 0
-        
+
         for strategy_name, strategy_config in strategies_config.items():
-            if strategy_config.get('enabled', False):
-                parameters = strategy_config.get('parameters', {})
-                
-                # Get strategy class and instantiate properly
+            if strategy_config.get("enabled", False):
                 strategy_class = self.strategy_registry.get(strategy_name)
                 if not strategy_class:
-                    self.logger.warning(f"Strategy not found: {strategy_name}")
+                    self.logger.warning(f"Strategy not found in registry: {strategy_name}")
                     continue
-                
+                parameters = strategy_config.get("parameters", {})
                 strategy = strategy_class(strategy_name, parameters)
-                
-                if strategy:
-                    # Attach indicators - create instances from registry
-                    indicators_config = self.config.get('indicators', {})
-                    for indicator_name, indicator_config in indicators_config.items():
-                        if indicator_config.get('enabled', False):
-                            # Get indicator class and instantiate
-                            indicator_class = self.indicator_registry.get(indicator_name)
-                            if indicator_class:
-                                indicator_params = indicator_config.get('parameters', {})
-                                indicator = indicator_class(indicator_name, indicator_params)
+                # Attach enabled indicators defined in config
+                indicators_config = self.config.get("indicators", {})
+                for indicator_name, indicator_config in indicators_config.items():
+                    if indicator_config.get("enabled", False):
+                        indicator_class = self.indicator_registry.get(indicator_name)
+                        if indicator_class:
+                            indicator_params = indicator_config.get("parameters", {})
+                            indicator = indicator_class(indicator_name, indicator_params)
+                            try:
                                 strategy.add_indicator(indicator)
-                            else:
-                                self.logger.warning(f"Indicator not found: {indicator_name}")
-                    
-                    self.strategies[strategy_name] = strategy
-                    active_count += 1
-                    self.logger.info(f"✅ Activated strategy: {strategy_name}")
-        
+                            except Exception:
+                                self.logger.exception(f"Failed to attach indicator {indicator_name} to {strategy_name}")
+                        else:
+                            self.logger.warning(f"Indicator class not found: {indicator_name}")
+                self.strategies[strategy_name] = strategy
+                active_count += 1
+                self.logger.info(f"✅ Activated strategy: {strategy_name}")
+
         self.logger.info(
-            f"✅ {active_count} active strategies, {strategy_count} total strategies, "
-            f"{indicator_count} indicators available"
+            f"✅ {active_count} active strategies, {strategy_count} total strategies, {indicator_count} indicators available"
         )
-    
+
     async def _send_startup_notification(self) -> None:
-        """Send startup notification to Telegram."""
+        """Send startup notification to Telegram (supports async or sync notifier)."""
         message = f"""
 🚀 APEX SIGNAL BOT™ STARTED
 ━━━━━━━━━━━━━━━━━━
@@ -258,65 +260,53 @@ class SignalBot:
 💰 Capital: ${self.capital:.2f}
 ⚠️ Risk per trade: {self.risk_per_trade:.1%}
 📊 Strategies: {len(self.strategies)}
-🎯 Indicators: {len(self.indicator_registry._registry)}
+🎯 Indicators: {len(getattr(self.indicator_registry, '_registry', {}))}
 ━━━━━━━━━━━━━━━━━━
 ⏰ Started at: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC
 """
         await self._send_telegram_message(message)
-    
+
     async def _send_feed_connected_notification(self) -> None:
-        """Send notification when live feed is connected."""
         if not self.telegram_notifier:
             return
-        
-        status = self.connector.get_status()
-        active_source = status.get('active_data_source', 'Unknown')
-        
+        status = {}
+        try:
+            status = self.connector.get_status()
+        except Exception:
+            self.logger.exception("Failed to get connector status")
+        active_source = status.get("active_data_source", "Unknown")
         message = f"""
 ✅ LIVE DATA FEED CONNECTED
 ━━━━━━━━━━━━━━━━━━
 📡 Active Source: {active_source}
 🔄 Data Verification: ENABLED
-⚠️ Price Deviation Limit: {status.get('max_deviation', 0.0005):.4%}
 ━━━━━━━━━━━━━━━━━━
 ⏰ Connected at: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC
 """
         await self._send_telegram_message(message)
-    
+
     async def _send_feed_failure_notification(self, error: str) -> None:
-        """Send notification when feed fails."""
         if not self.telegram_notifier:
             return
-        
         message = f"""
 ❌ LIVE DATA FEED FAILURE
 ━━━━━━━━━━━━━━━━━━
 ⚠️ Error: {error}
 🔄 Attempting reconnection...
 ⏰ Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC
-━━━━━━━━━━━━━━━━━━
-🚨 Bot will attempt automatic failover
 """
         await self._send_telegram_message(message)
-    
+
     async def _send_daily_summary(self) -> None:
-        """Send daily summary notification."""
         if not self.telegram_notifier or self.daily_summary_sent:
             return
-        
         today = datetime.utcnow().date()
-        
-        # Filter today's signals
-        todays_signals = [s for s in self.daily_signals if s['timestamp'].date() == today]
-        
+        todays_signals = [s for s in self.daily_signals if s["timestamp"].date() == today]
         if not todays_signals:
             return
-        
-        # Calculate stats
-        buy_signals = len([s for s in todays_signals if s['signal'] == 'BUY'])
-        sell_signals = len([s for s in todays_signals if s['signal'] == 'SELL'])
-        avg_confidence = np.mean([s['confidence'] for s in todays_signals])
-        
+        buy_signals = len([s for s in todays_signals if s.get("signal") == "BUY"])
+        sell_signals = len([s for s in todays_signals if s.get("signal") == "SELL"])
+        avg_confidence = float(np.mean([s.get("confidence", 0) for s in todays_signals])) if todays_signals else 0.0
         message = f"""
 📊 DAILY SUMMARY - APEX SIGNAL BOT™
 ━━━━━━━━━━━━━━━━━━
@@ -326,381 +316,272 @@ class SignalBot:
 🔴 SELL Signals: {sell_signals}
 🎯 Avg Confidence: {avg_confidence:.1f}%
 ━━━━━━━━━━━━━━━━━━
-💰 Capital: ${self.capital:.2f}
-⏰ Report at: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC
-━━━━━━━━━━━━━━━━━━
 """
         await self._send_telegram_message(message)
         self.daily_summary_sent = True
         self.last_summary_time = datetime.utcnow()
-    
+
     async def run(self) -> None:
-        """Main bot loop."""
+        """Main bot loop — intended to be started as background task (non-blocking FastAPI startup)."""
         self.logger.info("🚀 Starting main bot loop...")
-        
         try:
             while self.is_running:
-                # Update heartbeat
                 self.heartbeat_count += 1
-                
-                # Check if it's time for daily summary
                 now = datetime.utcnow()
-                if not self.daily_summary_sent and now.hour == 23 and now.minute >= 0:
+
+                # Daily summary logic: send at 23:00 UTC once
+                if not self.daily_summary_sent and now.hour == 23 and now.minute == 0:
                     await self._send_daily_summary()
-                
-                # Reset daily summary at midnight
+
+                # Reset daily flags daily
                 if self.last_summary_time and (now - self.last_summary_time).days >= 1:
                     self.daily_summary_sent = False
                     self.daily_signals = []
-                
-                # Scan symbols
-                for symbol in self.config.get('symbols', ['BTCUSDT']):
+
+                symbols = self.config.get("symbols", ["BTCUSDT", "ETHUSD", "XAUUSD"])
+                scan_interval = self.config.get("scan_interval", 60)
+
+                for symbol in symbols:
                     try:
                         await self._scan_symbol(symbol)
-                    except Exception as e:
-                        self.logger.error(f"Error scanning {symbol}: {e}")
-                        await self._send_error_notification(f"Scanning error for {symbol}: {e}")
-                
-                # Wait before next scan
-                scan_interval = self.config.get('scan_interval', 60)
+                    except Exception:
+                        self.logger.exception(f"Error scanning {symbol}")
+
                 await asyncio.sleep(scan_interval)
-                
+
         except asyncio.CancelledError:
-            self.logger.info("Bot loop cancelled")
-        except Exception as e:
-            self.logger.error(f"Bot loop error: {e}")
-            await self._send_error_notification(f"Critical error: {e}")
+            self.logger.info("Bot loop cancelled (graceful shutdown)")
+        except Exception:
+            self.logger.exception("Bot loop encountered an error")
+            await self._send_error_notification("Critical bot loop error")
         finally:
             await self.shutdown()
-    
+
     async def _scan_symbol(self, symbol: str) -> None:
         """Scan a symbol for trading opportunities."""
         try:
-            # Fetch current price with PriceManager (includes caching and verification)
-            price_data = self.price_manager.get_price(symbol)
-            
+            # price_manager.get_price assumed synchronous; wrap exceptions
+            try:
+                price_data = self.price_manager.get_price(symbol)
+            except Exception:
+                self.logger.exception("price_manager.get_price() failed")
+                price_data = None
+
             if price_data is None:
                 self.logger.error(f"❌ No price data for {symbol}")
                 self.data_source_connected = False
                 await self._send_feed_failure_notification("No price data available")
                 return
-            
-            # Extract price and metadata
-            price = price_data['price']
-            price_source = price_data['source']
-            price_checksum = price_data['checksum']
-            
-            # Update data source status
-            self.data_source_connected = True
-            self.last_data_check = datetime.utcnow()
-            
-            # Fetch historical data
-            bars = self.connector.fetch_bars(symbol, '1h', limit=100)
-            
-            if bars.empty:
+
+            price = price_data.get("price")
+            # fetch bars (assume synchronous)
+            bars = self.connector.fetch_bars(symbol, "1h", limit=100)
+            if bars is None or getattr(bars, "empty", False):
                 self.logger.warning(f"⚠️ No bar data for {symbol}")
                 return
-            
-            # Calculate indicators
-            for indicator_key in self.indicator_registry._registry:
-                indicator = self.indicator_registry.create_instance(
-                    indicator_key,
-                    {}
-                )
-                if indicator:
-                    bars = indicator.calculate(bars)
-            
-            # Generate signals from all strategies
+
+            # Apply registered indicators to bars via registry if necessary
+            for indicator_key in list(getattr(self.indicator_registry, "_registry", {}).keys()):
+                try:
+                    indicator = self.indicator_registry.create_instance(indicator_key, {})
+                    if indicator:
+                        bars = indicator.calculate(bars)
+                except Exception:
+                    self.logger.exception(f"Indicator {indicator_key} failed to calculate")
+
+            # Collect signals from active strategies
             signals = []
             strategy_alignment = []
             indicator_confirmation = []
-            
+
             for strategy_name, strategy in self.strategies.items():
                 try:
-                    signal = strategy.generate_signal(bars)
-                    
-                    # Check if signal is valid
-                    if signal and signal.get('signal') in ['BUY', 'SELL']:
-                        signals.append(signal)
+                    result = strategy.generate_signal(bars)
+                    if result and result.get("signal") in ["BUY", "SELL"]:
+                        signals.append(result)
                         strategy_alignment.append(strategy_name)
-                        
-                        # Track indicators used
-                        for indicator in strategy.indicators:
-                            indicator_confirmation.append(indicator.name)
-                        
-                except Exception as e:
-                    self.logger.error(f"Error in strategy {strategy_name}: {e}")
-            
-            # Calculate dynamic confidence
-            confidence = self._calculate_confidence(
-                signals,
-                strategy_alignment,
-                indicator_confirmation,
-                bars
-            )
-            
-            # Intelligent minimum threshold - reject weak confluence
-            min_confidence_threshold = 60  # 60% minimum confidence
+                        # collect indicators used by strategy if available
+                        for ind in getattr(strategy, "indicators", []):
+                            try:
+                                indicator_confirmation.append(getattr(ind, "name", str(ind)))
+                            except Exception:
+                                pass
+                except Exception:
+                    self.logger.exception(f"Strategy {strategy_name} failure during scan")
+
+            confidence = self._calculate_confidence(signals, strategy_alignment, indicator_confirmation, bars)
+
+            min_confidence_threshold = float(self.config.get("min_confidence", 60.0))
             if confidence < min_confidence_threshold:
-                self.logger.info(
-                    f"⏭️ Skipping signal for {symbol} - confidence {confidence:.1f}% "
-                    f"below threshold {min_confidence_threshold}%"
-                )
+                self.logger.info(f"⏭️ Skipping {symbol} - confidence {confidence:.1f}% < {min_confidence_threshold}%")
                 return
-            
-            # Generate signal if we have valid signals
+
             if signals:
-                # Auto-select best signal
                 primary_signal = self._auto_select_best_signal(signals, bars)
-                
-                if primary_signal and primary_signal.get('signal') in ['BUY', 'SELL']:
-                    signal_type = primary_signal.get('signal', 'HOLD')
-                    
-                    # Find the strategy that produced this signal
-                    primary_strategy_name = 'Unknown'
-                    if len(strategy_alignment) > 0:
-                        primary_strategy_name = strategy_alignment[0]
-                    
-                    # Generate TP/SL with multiple targets
-                    tp_levels, sl = self._calculate_tp_sl_levels(
-                        price,
-                        signal_type,
-                        bars
-                    )
-                    
-                    # Get price data with checksum
-                    price_data = self.price_manager.get_price(symbol)
-                    if price_data:
-                        checksum = price_data['checksum']
-                        primary_source = price_data['source']
-                        secondary_source = price_data.get('secondary_source', 'N/A')
-                        price_deviation = price_data['deviation']
-                    else:
-                        checksum = self.connector.get_price_checksum(symbol, price)
-                        primary_source = 'unknown'
-                        secondary_source = 'unknown'
-                        price_deviation = 0.0
-                    
-                    # Create signal message
+                if primary_signal and primary_signal.get("signal") in ["BUY", "SELL"]:
+                    signal_type = primary_signal.get("signal")
+                    primary_strategy_name = strategy_alignment[0] if strategy_alignment else "unknown"
+                    tp_levels, sl = self._calculate_tp_sl_levels(price, signal_type, bars)
+
+                    price_data = self.price_manager.get_price(symbol) or {}
+                    checksum = price_data.get("checksum", hashlib.md5(str(price).encode()).hexdigest())
+                    primary_source = price_data.get("source", "unknown")
+                    secondary_source = price_data.get("secondary_source", "N/A")
+                    price_deviation = price_data.get("deviation", 0.0)
+
                     signal_data = {
-                        'symbol': symbol,
-                        'signal': signal_type,
-                        'price': price,
-                        'tp': tp_levels[0],
-                        'tp1': tp_levels[0],
-                        'tp2': tp_levels[1],
-                        'tp3': tp_levels[2],
-                        'sl': sl,
-                        'confidence': confidence,
-                        'strategies': strategy_alignment,
-                        'indicators': list(set(indicator_confirmation)),
-                        'checksum': checksum,
-                        'primary_source': primary_source,
-                        'secondary_source': secondary_source,
-                        'price_deviation': price_deviation,
-                        'timestamp': datetime.utcnow(),
-                        'strategy_name': primary_strategy_name,
+                        "symbol": symbol,
+                        "signal": signal_type,
+                        "price": price,
+                        "tp": tp_levels[0],
+                        "tp1": tp_levels[0],
+                        "tp2": tp_levels[1],
+                        "tp3": tp_levels[2],
+                        "sl": sl,
+                        "confidence": confidence,
+                        "strategies": strategy_alignment,
+                        "indicators": list(set(indicator_confirmation)),
+                        "checksum": checksum,
+                        "primary_source": primary_source,
+                        "secondary_source": secondary_source,
+                        "price_deviation": price_deviation,
+                        "timestamp": datetime.utcnow(),
+                        "strategy_name": primary_strategy_name,
                     }
-                    
-                    # Send signal to Telegram
+
                     await self._send_signal(signal_data)
-                    
+
                     self.last_signal_time = datetime.utcnow()
                     self.signal_count += 1
                     self.signal_history.append(signal_data)
                     self.daily_signals.append(signal_data)
-                    
-        except Exception as e:
-            self.logger.error(f"Error scanning {symbol}: {e}")
-            await self._send_error_notification(f"Scanning error for {symbol}: {e}")
-    
-    def _auto_select_best_signal(
-        self,
-        signals: List[Dict[str, Any]],
-        bars: pd.DataFrame
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Automatically select the best signal using AI-based criteria.
-        Considers trend alignment, volume confirmation, and volatility.
-        """
+
+        except Exception:
+            self.logger.exception(f"Unhandled error scanning {symbol}")
+            await self._send_error_notification(f"Scanning error for {symbol}")
+
+    def _auto_select_best_signal(self, signals: List[Dict[str, Any]], bars: pd.DataFrame) -> Optional[Dict[str, Any]]:
         if not signals:
             return None
-        
-        # Score each signal
         scored_signals = []
-        
         for signal in signals:
             score = 0
-            signal_type = signal.get('signal', 'HOLD')
-            
-            # Trend alignment score (40%)
-            if 'ema_20' in bars.columns and 'ema_50' in bars.columns:
-                latest_ema20 = bars['ema_20'].iloc[-1]
-                latest_ema50 = bars['ema_50'].iloc[-1]
-                
-                if signal_type == 'BUY' and latest_ema20 > latest_ema50:
-                    score += 40  # Bullish trend alignment
-                elif signal_type == 'SELL' and latest_ema20 < latest_ema50:
-                    score += 40  # Bearish trend alignment
-            
-            # Volume confirmation score (30%)
-            if 'volume' in bars.columns:
-                avg_volume = bars['volume'].iloc[-20:].mean()
-                latest_volume = bars['volume'].iloc[-1]
-                
-                if latest_volume > avg_volume * 1.2:
-                    score += 30  # Volume spike confirmation
-            
-            # Volatility score (30%)
-            if 'atr_14' in bars.columns:
-                atr = bars['atr_14'].iloc[-1]
-                latest_close = bars['close'].iloc[-1]
-                
-                # ATR in reasonable range (not too flat, not too volatile)
-                atr_pct = atr / latest_close
-                if 0.01 < atr_pct < 0.05:
-                    score += 30  # Good volatility
-                elif atr_pct >= 0.01:
-                    score += 15  # Acceptable volatility
-            
-            signal['_score'] = score
+            signal_type = signal.get("signal", "HOLD")
+            try:
+                if "ema_20" in bars.columns and "ema_50" in bars.columns:
+                    latest_ema20 = bars["ema_20"].iloc[-1]
+                    latest_ema50 = bars["ema_50"].iloc[-1]
+                    if signal_type == "BUY" and latest_ema20 > latest_ema50:
+                        score += 40
+                    elif signal_type == "SELL" and latest_ema20 < latest_ema50:
+                        score += 40
+                if "volume" in bars.columns:
+                    avg_volume = bars["volume"].iloc[-20:].mean()
+                    latest_volume = bars["volume"].iloc[-1]
+                    if latest_volume > avg_volume * 1.2:
+                        score += 30
+                if "atr_14" in bars.columns:
+                    atr = bars["atr_14"].iloc[-1]
+                    latest_close = bars["close"].iloc[-1]
+                    atr_pct = atr / latest_close if latest_close else 0
+                    if 0.01 < atr_pct < 0.05:
+                        score += 30
+                    elif atr_pct >= 0.01:
+                        score += 15
+            except Exception:
+                self.logger.exception("Error scoring a signal")
+            signal["_score"] = score
             scored_signals.append(signal)
-        
-        # Select highest scored signal
         if scored_signals:
-            best_signal = max(scored_signals, key=lambda x: x['_score'])
-            return best_signal
-        
+            return max(scored_signals, key=lambda x: x.get("_score", 0))
         return None
-    
-    def _calculate_confidence(
-        self,
-        signals: List[Dict[str, Any]],
-        strategy_alignment: List[str],
-        indicator_confirmation: List[str],
-        bars: pd.DataFrame
-    ) -> float:
-        """
-        Calculate dynamic confidence based on multiple factors.
-        Confidence range: 0-100%
-        """
+
+    def _calculate_confidence(self, signals, strategy_alignment, indicator_confirmation, bars) -> float:
         confidence = 0.0
-        
-        # Strategy alignment (up to 50%)
-        num_strategies = max(len(self.strategies), 1)
-        aligned_strategies = len(strategy_alignment)
-        strategy_score = (aligned_strategies / num_strategies) * 50
-        confidence += strategy_score
-        
-        # Indicator confirmation (up to 30%)
-        num_indicators = max(len(self.indicator_registry._registry), 1)
-        confirmed_indicators = len(set(indicator_confirmation))
-        indicator_score = (confirmed_indicators / num_indicators) * 30
-        confidence += indicator_score
-        
-        # Trend strength (up to 20%)
-        if bars is not None and len(bars) > 0:
-            if 'ema_20' in bars.columns and 'ema_50' in bars.columns:
-                latest_ema20 = bars['ema_20'].iloc[-1]
-                latest_ema50 = bars['ema_50'].iloc[-1]
-                
-                if latest_ema20 > latest_ema50:
-                    confidence += 10  # Bullish
-                elif latest_ema20 < latest_ema50:
-                    confidence += 10  # Bearish
-        
-        # Ensure confidence is in valid range
-        confidence = max(0, min(100, confidence))
-        
-        return confidence
-    
-    def _calculate_tp_sl_levels(
-        self,
-        price: float,
-        signal_type: str,
-        bars: pd.DataFrame
-    ) -> Tuple[List[float], float]:
-        """
-        Calculate Take Profit levels and Stop Loss with multiple targets.
-        TP1: 1x ATR, TP2: 2x ATR, TP3: 3x ATR
-        SL: 1.5x ATR
-        """
         try:
-            # Get ATR if available
-            if 'atr_14' in bars.columns:
-                atr = bars['atr_14'].iloc[-1]
+            num_strategies = max(len(self.strategies), 1)
+            aligned_strategies = len(strategy_alignment)
+            strategy_score = (aligned_strategies / num_strategies) * 50
+            confidence += strategy_score
+
+            num_indicators = max(len(getattr(self.indicator_registry, "_registry", {})), 1)
+            confirmed_indicators = len(set(indicator_confirmation))
+            indicator_score = (confirmed_indicators / num_indicators) * 30
+            confidence += indicator_score
+
+            if bars is not None and len(bars) > 0:
+                if "ema_20" in bars.columns and "ema_50" in bars.columns:
+                    latest_ema20 = bars["ema_20"].iloc[-1]
+                    latest_ema50 = bars["ema_50"].iloc[-1]
+                    confidence += 10
+        except Exception:
+            self.logger.exception("Error calculating confidence")
+        return max(0, min(100, confidence))
+
+    def _calculate_tp_sl_levels(self, price, signal_type, bars) -> Tuple[List[float], float]:
+        try:
+            if "atr_14" in bars.columns:
+                atr = bars["atr_14"].iloc[-1]
             else:
-                # Default ATR (1% of price)
                 atr = price * 0.01
-            
-            if signal_type == 'BUY':
-                tp1 = price + (atr * 1)   # Conservative TP
-                tp2 = price + (atr * 2)   # Standard TP
-                tp3 = price + (atr * 3)   # Aggressive TP
-                sl = price - (atr * 1.5)  # SL
-            else:  # SELL
-                tp1 = price - (atr * 1)
-                tp2 = price - (atr * 2)
-                tp3 = price - (atr * 3)
-                sl = price + (atr * 1.5)
-            
+            if signal_type == "BUY":
+                tp1 = price + atr * 1
+                tp2 = price + atr * 2
+                tp3 = price + atr * 3
+                sl = price - atr * 1.5
+            else:
+                tp1 = price - atr * 1
+                tp2 = price - atr * 2
+                tp3 = price - atr * 3
+                sl = price + atr * 1.5
             return [tp1, tp2, tp3], sl
-            
-        except Exception as e:
-            self.logger.error(f"Error calculating TP/SL: {e}")
-            # Fallback to 1% TP/SL
-            if signal_type == 'BUY':
+        except Exception:
+            self.logger.exception("TP/SL calculation error")
+            if signal_type == "BUY":
                 return [price * 1.01, price * 1.02, price * 1.03], price * 0.99
             else:
                 return [price * 0.99, price * 0.98, price * 0.97], price * 1.01
-    
+
     async def _send_signal(self, signal_data: Dict[str, Any]) -> None:
-        """Send signal to Telegram with professional formatting."""
-        symbol = signal_data['symbol']
-        signal_type = signal_data['signal']
-        price = signal_data['price']
-        tp1 = signal_data['tp1']
-        tp2 = signal_data['tp2']
-        tp3 = signal_data['tp3']
-        sl = signal_data['sl']
-        confidence = signal_data['confidence']
-        indicators = signal_data['indicators']
-        checksum = signal_data['checksum']
-        timestamp = signal_data['timestamp']
-        strategy_name = signal_data['strategy_name']
-        
-        # Determine trend bias
-        trend_bias = "🟢 Bullish" if signal_type == 'BUY' else "🔴 Bearish"
-        
-        # Calculate risk-reward ratio (using TP2 as main target)
-        if signal_type == 'BUY':
-            rr_ratio = (tp2 - price) / (price - sl) if price > sl else 0
-        else:
-            rr_ratio = (price - tp2) / (sl - price) if sl > price else 0
-        
-        # Calculate position size and risk amount
+        """Send signal to Telegram with professional formatting (async-safe)."""
+        symbol = signal_data.get("symbol")
+        signal_type = signal_data.get("signal")
+        price = signal_data.get("price")
+        tp1 = signal_data.get("tp1")
+        tp2 = signal_data.get("tp2")
+        tp3 = signal_data.get("tp3")
+        sl = signal_data.get("sl")
+        confidence = signal_data.get("confidence", 0)
+        indicators = signal_data.get("indicators", [])
+        checksum = signal_data.get("checksum", "")[:12]
+        timestamp = signal_data.get("timestamp", datetime.utcnow())
+        strategy_name = signal_data.get("strategy_name", "unknown")
+
+        rr_ratio = 0.0
+        try:
+            if signal_type == "BUY" and price and sl:
+                rr_ratio = (tp2 - price) / (price - sl) if price > sl else 0
+            elif signal_type == "SELL" and price and sl:
+                rr_ratio = (price - tp2) / (sl - price) if sl > price else 0
+        except Exception:
+            pass
+
         risk_amount = self.capital * self.risk_per_trade
-        if signal_type == 'BUY':
-            position_size = risk_amount / (price - sl) if price > sl else 0
-        else:
-            position_size = risk_amount / (sl - price) if sl > price else 0
-        
-        # Get market structure status
+        position_size = 0.0
+        try:
+            if signal_type == "BUY" and price and sl and price > sl:
+                position_size = risk_amount / (price - sl)
+            elif signal_type == "SELL" and price and sl and sl > price:
+                position_size = risk_amount / (sl - price)
+        except Exception:
+            pass
+
         market_structure = self._get_market_structure_status()
-        
-        # Get volume confirmation
         volume_status = self._get_volume_status()
-        
-        # Get volatility state
         volatility_state = self._get_volatility_state()
-        
-        # Get active data source
-        data_source = self.connector.get_status().get('active_data_source', 'Unknown')
-        price_deviation_pct = signal_data.get('price_deviation', 0) * 100
-        primary_source = signal_data.get('primary_source', data_source)
-        secondary_source = signal_data.get('secondary_source', 'N/A')
-        
-        # Format message with APEX SIGNAL BOT™ branding
+        data_source = self.connector.get_status().get("active_data_source", "Unknown") if self.connector else "unknown"
+        price_deviation_pct = signal_data.get("price_deviation", 0.0) * 100.0
+
         message = f"""
 APEX SIGNAL BOT™ 🚀
 ━━━━━━━━━━━━━━━━━━
@@ -726,10 +607,10 @@ Volatility State: {volatility_state}
 
 ━━━━━━━━━━━━━━━━━━
 
-🧮 Price Checksum: {checksum[:12]}...
+🧮 Price Checksum: {checksum}...
 📊 Price Deviation: {price_deviation_pct:.2f}%
-📡 Primary Source: {primary_source}
-📡 Secondary Source: {secondary_source}
+📡 Primary Source: {signal_data.get('primary_source', data_source)}
+📡 Secondary Source: {signal_data.get('secondary_source', 'N/A')}
 🧠 Strategy: {strategy_name}
 
 ━━━━━━━━━━━━━━━━━━
@@ -740,33 +621,22 @@ Volatility State: {volatility_state}
 
 ⚠️ Educational signal. Not financial advice.
 """
-        
         await self._send_telegram_message(message)
         self.logger.info(f"📨 Sent {signal_type} signal for {symbol} (confidence: {confidence:.0f}%, strategy: {strategy_name})")
-    
+
     def _get_market_structure_status(self) -> str:
-        """Get current market structure status."""
-        # This would analyze HH/HL, LH/LL, etc.
-        # For now, return a placeholder
         return "Analyzing..."
-    
+
     def _get_volume_status(self) -> str:
-        """Get current volume confirmation status."""
-        # This would analyze volume spikes, OBV, etc.
-        # For now, return a placeholder
         return "Checking..."
-    
+
     def _get_volatility_state(self) -> str:
-        """Get current volatility state."""
-        # This would analyze ATR, BB, etc.
-        # For now, return a placeholder
         return "Measuring..."
-    
+
     async def _send_error_notification(self, error: str) -> None:
-        """Send error notification to Telegram."""
         if not self.telegram_notifier:
+            self.logger.error(f"[ERROR] {error}")
             return
-        
         message = f"""
 ⚠️ ERROR DETECTED - APEX SIGNAL BOT™
 ━━━━━━━━━━━━━━━━━━
@@ -775,53 +645,37 @@ Volatility State: {volatility_state}
 ━━━━━━━━━━━━━━━━━━
 """
         await self._send_telegram_message(message)
-    
+
     async def _send_telegram_message(self, message: str) -> None:
-        """Send message to Telegram (or log in test mode)."""
+        """Send message to Telegram (supports sync/async notifier APIs)."""
         if self.mode == Mode.LIVE_SIGNAL and self.telegram_notifier:
             try:
-                success = self.telegram_notifier.send_notification(message)
-                if not success:
-                    self.logger.warning("⚠️ Failed to send Telegram message")
-            except Exception as e:
-                self.logger.error(f"❌ Error sending Telegram message: {e}")
+                res = None
+                try:
+                    res = self.telegram_notifier.send_notification(message)
+                except TypeError:
+                    # If the notifier expects different args, try send_message
+                    try:
+                        res = self.telegram_notifier.send_message(message)
+                    except Exception:
+                        res = None
+
+                # If result is coroutine, await it.
+                if asyncio.iscoroutine(res):
+                    await res
+            except Exception:
+                self.logger.exception("❌ Error sending Telegram message")
         else:
-            self.logger.info(f"[TELEGRAM TEST] {message[:100]}...")
-    
+            # Test mode - log the message summary only
+            self.logger.info(f"[TELEGRAM TEST] {message[:200].replace(chr(10),' ')}")
+
     async def shutdown(self) -> None:
-        """Graceful shutdown."""
+        """Graceful shutdown. send daily summary if possible."""
         self.logger.info("🛑 Shutting down bot...")
         self.is_running = False
         self.healthy = False
-        
-        # Send daily summary before shutdown
-        if self.telegram_notifier:
-            await self._send_daily_summary()
-
-
-# Main entry point
-if __name__ == '__main__':
-    import asyncio
-    
-    async def main():
-        bot = SignalBot()
-        
-        # Initialize bot
-        if not await bot.initialize():
-            logger = logging.getLogger(__name__)
-            logger.error("❌ Bot initialization failed")
-            logger.error("❌ CANNOT OPERATE WITHOUT LIVE DATA")
-            sys.exit(1)
-        
-        # Run bot
         try:
-            await bot.run()
-        except KeyboardInterrupt:
-            logger = logging.getLogger(__name__)
-            logger.info("🛑 Bot stopped by user")
-        except Exception as e:
-            logger = logging.getLogger(__name__)
-            logger.error(f"❌ Bot crashed: {e}")
-            sys.exit(1)
-    
-    asyncio.run(main())
+            if self.telegram_notifier:
+                await self._send_daily_summary()
+        except Exception:
+            self.logger.exception("Error during shutdown summary")
