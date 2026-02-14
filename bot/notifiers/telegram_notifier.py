@@ -1,21 +1,19 @@
-# bot/notifiers/telegram.py
 """
-APEX SIGNAL™ - Branded Telegram Notification Adapter
-Production-grade messaging with branded templates, async wrappers and a send_notification compatibility API.
+APEX SIGNAL™ Institutional Telegram Engine
+Version 4.0.0 - Full Autonomous Production Build
 """
 
 import os
-import logging
 import asyncio
-import hashlib
+import logging
+import sqlite3
+from datetime import datetime, time
 from typing import Dict, Any, Optional, List
-from datetime import datetime
 from dataclasses import dataclass
+from pathlib import Path
 
-# Only import telegram if available
 try:
-    from telegram import Bot
-    from telegram.error import TelegramError
+    from telegram import Bot, InlineKeyboardMarkup, InlineKeyboardButton
     TELEGRAM_AVAILABLE = True
 except Exception:
     TELEGRAM_AVAILABLE = False
@@ -24,210 +22,241 @@ except Exception:
 logger = logging.getLogger("APEX_TELEGRAM")
 
 
+# ==============================
+# DATABASE LAYER
+# ==============================
+
+class TradeDatabase:
+
+    def __init__(self, db_path="apex_trades.db"):
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._create_tables()
+
+    def _create_tables(self):
+        cursor = self.conn.cursor()
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT,
+            side TEXT,
+            entry REAL,
+            stop REAL,
+            tp1 REAL,
+            tp2 REAL,
+            tp3 REAL,
+            confidence INTEGER,
+            tier TEXT,
+            status TEXT,
+            pnl REAL DEFAULT 0,
+            created_at TEXT
+        )
+        """)
+        self.conn.commit()
+
+    def insert_trade(self, trade):
+        cursor = self.conn.cursor()
+        cursor.execute("""
+        INSERT INTO trades(symbol, side, entry, stop, tp1, tp2, tp3, confidence, tier, status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, trade)
+        self.conn.commit()
+
+    def update_trade_status(self, trade_id, status, pnl):
+        cursor = self.conn.cursor()
+        cursor.execute("UPDATE trades SET status=?, pnl=? WHERE id=?", (status, pnl, trade_id))
+        self.conn.commit()
+
+    def get_stats(self):
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT COUNT(*), SUM(pnl) FROM trades WHERE status='closed'")
+        total, pnl = cursor.fetchone()
+        return {
+            "total_closed": total or 0,
+            "total_pnl": pnl or 0
+        }
+
+
+# ==============================
+# SIGNAL STRUCTURE
+# ==============================
+
 @dataclass
 class SignalData:
     symbol: str
     side: str
-    timeframe: str
-    strategy_name: str
-    strategy_id: str
-    indicators: List[str]
+    entry: float
+    stop: float
+    tp1: float
+    tp2: float
+    tp3: float
     confidence: int
-    confluence_score: int
-    entry_price: float
-    stop_loss: float
-    take_profits: List[float]
-    position_size: float
-    position_value: float
-    risk_percent: float
-    risk_reward_ratio: str
-    trade_id: str
-    log_snippet: str = ""
+    strategy: str
+    indicators: List[str]
 
+
+# ==============================
+# MAIN NOTIFIER
+# ==============================
 
 class TelegramNotifier:
-    """
-    Telegram notifier providing:
-    - send_notification(message, signal) compatibility
-    - send_signal / send_signal_async for structured messages
-    - send_message / send_message_async low-level
-    """
 
-    def __init__(self, token: Optional[str] = None, chat_id: Optional[str] = None, version: str = "3.0.0"):
-        self.token = token
-        self.chat_id = chat_id
-        self.version = version
-        self.enabled = bool(token and chat_id and TELEGRAM_AVAILABLE)
+    def __init__(self):
+        self.token = os.getenv("TELEGRAM_BOT_TOKEN")
+        self.chat_id = os.getenv("TELEGRAM_CHAT_ID")
+        self.enabled = bool(self.token and self.chat_id and TELEGRAM_AVAILABLE)
 
-        if self.enabled:
-            self.bot = Bot(token=token)
-            self._throttle_lock = asyncio.Lock()
-            logger.info("✅ Telegram notifier initialized")
-        else:
-            self.bot = None
-            logger.warning("⚠️ Telegram notifier is disabled (missing credentials or lib)")
+        self.db = TradeDatabase()
+        self.bot = Bot(token=self.token) if self.enabled else None
+        self.quiet_start = time(23, 0)
+        self.quiet_end = time(6, 0)
 
-    def is_enabled(self) -> bool:
-        return self.enabled
+    # ==========================
+    # CONFIDENCE TIER ENGINE
+    # ==========================
 
-    def format_signal_message(self, signal: SignalData) -> str:
-        targets_str = ", ".join([f"${tp:.2f}" for tp in signal.take_profits]) if signal.take_profits else "N/A"
-        indicators_str = ", ".join(signal.indicators) if signal.indicators else "N/A"
-        trace_id = f"{signal.trade_id[:8]}.../{signal.strategy_id[:8]}..."
-        message = f"""🛡️ APEX SIGNAL™ • v{self.version}
-🔔 SIGNAL: {signal.symbol} {signal.side} ({signal.timeframe})
-📈 STRATEGY: {signal.strategy_name} — indicator(s): {indicators_str}
-💎 CONFIDENCE: {signal.confidence}% (0-100)
-💰 POSITION SIZE: {signal.position_size:.6f} / ${signal.position_value:.2f}
-⚖️  RISK: {signal.risk_percent}% | RR: {signal.risk_reward_ratio}
-📌 ENTRY: ${signal.entry_price:.2f}
-🛑 STOP: ${signal.stop_loss:.2f}
-🎯 TARGETS: {targets_str}
-🧾 SCORE: Confluence={signal.confluence_score} / Confidence={signal.confidence}
-🕒 TIMESTAMP: {datetime.utcnow().isoformat()}Z
-🔗 TRACE: {trace_id}
-🧾 LOG: {signal.log_snippet[:100] if signal.log_snippet else 'N/A'}...
-— APEX SIGNAL™ (professional, institutional)"""
-        return message
+    def _confidence_tier(self, confidence: int):
+        if confidence >= 85:
+            return "ELITE 🔥"
+        elif confidence >= 70:
+            return "STRONG 💪"
+        return "MODERATE ⚖️"
 
-    def format_compact_signal_message(self, signal: SignalData) -> str:
-        message = f"""🛡️ APEX SIGNAL™ • v{self.version}
-{signal.symbol} {signal.side} @ ${signal.entry_price:.2f}
-💎 {signal.confidence}% confidence | {signal.strategy_name}
-TP: ${signal.take_profits[0]:.2f} | SL: ${signal.stop_loss:.2f}
-RR: {signal.risk_reward_ratio} | {signal.position_size:.6f} units
-{datetime.utcnow().strftime('%H:%M:%S')} UTC"""
-        return message
+    # ==========================
+    # QUIET HOURS
+    # ==========================
 
-    def format_heartbeat_message(self, stats: Dict[str, Any]) -> str:
-        uptime = stats.get("uptime", "N/A")
-        signals_last_hour = stats.get("signals_last_hour", 0)
-        last_trade_time = stats.get("last_trade_time", "N/A")
-        cpu_percent = stats.get("cpu_percent", 0)
-        memory_mb = stats.get("memory_mb", 0)
-        message = f"""🛡️ APEX SIGNAL™ • v{self.version} - HEARTBEAT
-⏱️  UPTIME: {uptime}
-📊 Signals (last hour): {signals_last_hour}
-🕒 Last trade: {last_trade_time}
-💻 CPU: {cpu_percent:.1f}% | RAM: {memory_mb:.1f} MB
-✅ System operational
-{datetime.utcnow().strftime('%H:%M:%S')} UTC"""
-        return message
+    def _in_quiet_hours(self):
+        now = datetime.utcnow().time()
+        return now >= self.quiet_start or now <= self.quiet_end
 
-    def format_error_message(self, error: str) -> str:
-        message = f"""🛡️ APEX SIGNAL™ • v{self.version} - ERROR ALERT
-⚠️  {error}
-{datetime.utcnow().strftime('%H:%M:%S')} UTC"""
-        return message
+    # ==========================
+    # PNL CALCULATION
+    # ==========================
 
-    # ---------- low level senders ----------
-    async def send_message_async(self, message: str, max_retries: int = 3) -> bool:
+    def calculate_pnl(self, side, entry, exit_price):
+        if side.upper() == "BUY":
+            return round(exit_price - entry, 2)
+        return round(entry - exit_price, 2)
+
+    # ==========================
+    # FORMAT MESSAGE
+    # ==========================
+
+    def _format_signal(self, signal: SignalData):
+
+        tier = self._confidence_tier(signal.confidence)
+
+        return f"""
+🛡️ APEX SIGNAL™ 4.0
+
+📊 {signal.symbol}
+📍 {signal.side}
+🎯 Strategy: {signal.strategy}
+
+💎 Confidence: {signal.confidence}% — {tier}
+
+📌 Entry: {signal.entry}
+🛑 Stop: {signal.stop}
+🎯 TP1: {signal.tp1}
+🎯 TP2: {signal.tp2}
+🎯 TP3: {signal.tp3}
+
+🕒 {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC
+"""
+
+    # ==========================
+    # SEND WITH BUTTONS
+    # ==========================
+
+    async def _send_async(self, text, signal: Optional[SignalData] = None):
+
         if not self.enabled:
-            logger.debug(f"Telegram disabled - message would be: {message[:80]}...")
+            print(text)
             return True
-        for attempt in range(max_retries + 1):
-            try:
-                # simple rate-limit safety (small)
-                async with self._throttle_lock:
-                    await self.bot.send_message(chat_id=self.chat_id, text=message, parse_mode="HTML")
-                logger.info("✅ Telegram message sent")
-                return True
-            except TelegramError as e:
-                logger.warning(f"TelegramError attempt {attempt+1}: {e}")
-                if attempt == max_retries:
-                    logger.error("Failed to send Telegram message after retries")
-                    return False
-                await asyncio.sleep(2 ** attempt)
-            except Exception as e:
-                logger.exception("Unexpected error sending Telegram message")
-                return False
-        return False
 
-    def send_message(self, message: str) -> bool:
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop.create_task(self.send_message_async(message))
-                return True
-            else:
-                return asyncio.run(self.send_message_async(message))
-        except Exception as e:
-            logger.exception("send_message wrapper failed")
-            return False
+        buttons = None
 
-    # ---------- structured signal API ----------
-    async def send_signal_async(self, signal: SignalData, compact: bool = False) -> bool:
-        message = self.format_compact_signal_message(signal) if compact else self.format_signal_message(signal)
-        return await self.send_message_async(message)
+        if signal:
+            buttons = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("📈 Copy Trade", callback_data="copy_trade"),
+                    InlineKeyboardButton("📊 Stats", callback_data="stats")
+                ]
+            ])
 
-    def send_signal(self, signal: SignalData, compact: bool = False) -> bool:
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop.create_task(self.send_signal_async(signal, compact))
-                return True
-            else:
-                return asyncio.run(self.send_signal_async(signal, compact))
-        except Exception:
-            logger.exception("send_signal wrapper failed")
-            return False
+        await self.bot.send_message(
+            chat_id=self.chat_id,
+            text=text,
+            reply_markup=buttons
+        )
+        return True
 
-    # ---------- compatibility API used by engine ----------
-    def send_notification(self, message: str, raw_signal: Dict[str, Any]) -> bool:
-        """
-        Compatibility entrypoint used by engine: Accepts engine message + raw signal dict.
-        Converts raw_signal into SignalData when possible, else sends the plain message.
-        """
-        try:
-            # try to convert
-            try:
-                sd = SignalData(
-                    symbol=raw_signal.get("symbol", "N/A"),
-                    side=raw_signal.get("signal", "N/A"),
-                    timeframe=raw_signal.get("timeframe", raw_signal.get("tf", "1m")),
-                    strategy_name=raw_signal.get("strategy_name", "unknown"),
-                    strategy_id=raw_signal.get("strategy_id", "unknown"),
-                    indicators=raw_signal.get("metadata", {}).get("indicators", []) or raw_signal.get("indicators", []),
-                    confidence=int(raw_signal.get("confidence", 0) * 100) if isinstance(raw_signal.get("confidence", 0), float) else int(raw_signal.get("confidence", 0) or 0),
-                    confluence_score=int(raw_signal.get("confluence_score", raw_signal.get("confluence", 0) or 0)),
-                    entry_price=float(raw_signal.get("entry_price", raw_signal.get("metadata", {}).get("price", 0.0) or 0.0)),
-                    stop_loss=float(raw_signal.get("stop_loss", raw_signal.get("metadata", {}).get("stop_loss", 0.0) or 0.0)),
-                    take_profits=raw_signal.get("take_profits", raw_signal.get("metadata", {}).get("tps", []) or []),
-                    position_size=float(raw_signal.get("position_size", 0.0) or 0.0),
-                    position_value=float(raw_signal.get("position_value", 0.0) or 0.0),
-                    risk_percent=float(raw_signal.get("risk_percent", 0.0) or 0.0),
-                    risk_reward_ratio=str(raw_signal.get("risk_reward_ratio", raw_signal.get("rr", "N/A"))),
-                    trade_id=raw_signal.get("trade_id", raw_signal.get("id", "")) or hashlib.md5(str(raw_signal).encode()).hexdigest(),
-                    log_snippet=str(raw_signal.get("metadata", {}).get("log_snippet", ""))[:400]
-                )
-                # send structured message
-                return self.send_signal(sd)
-            except Exception:
-                # fallback: send raw message
-                return self.send_message(message)
-        except Exception:
-            logger.exception("send_notification failed")
-            return False
+    def send_signal(self, raw_signal: Dict[str, Any]):
 
-    def send_heartbeat(self, stats: Dict[str, Any]) -> bool:
-        try:
-            return self.send_message(self.format_heartbeat_message(stats))
-        except Exception:
-            logger.exception("send_heartbeat failed")
-            return False
+        signal = SignalData(
+            symbol=raw_signal["symbol"],
+            side=raw_signal["signal"],
+            entry=float(raw_signal["price"]),
+            stop=float(raw_signal["sl"]),
+            tp1=float(raw_signal["tp1"]),
+            tp2=float(raw_signal["tp2"]),
+            tp3=float(raw_signal["tp3"]),
+            confidence=int(raw_signal["confidence"]),
+            strategy=raw_signal.get("strategy_name", "Multi-Factor AI"),
+            indicators=raw_signal.get("indicators", [])
+        )
 
-    def send_error(self, error: str) -> bool:
-        try:
-            return self.send_message(self.format_error_message(error))
-        except Exception:
-            logger.exception("send_error failed")
-            return False
+        tier = self._confidence_tier(signal.confidence)
 
+        # Store trade
+        self.db.insert_trade((
+            signal.symbol,
+            signal.side,
+            signal.entry,
+            signal.stop,
+            signal.tp1,
+            signal.tp2,
+            signal.tp3,
+            signal.confidence,
+            tier,
+            "open",
+            datetime.utcnow().isoformat()
+        ))
 
-def create_telegram_notifier() -> TelegramNotifier:
-    """
-    Factory that reads environment and returns an instance (may be disabled).
-    """
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-    return TelegramNotifier(token=token, chat_id=chat_id)
+        message = self._format_signal(signal)
+
+        asyncio.run(self._send_async(message, signal))
+
+    # ==========================
+    # HEARTBEAT
+    # ==========================
+
+    def send_heartbeat(self):
+        stats = self.db.get_stats()
+
+        message = f"""
+🟢 APEX SIGNAL™ LIVE
+
+📊 Closed Trades: {stats["total_closed"]}
+💰 Total PNL: {stats["total_pnl"]}
+
+System Status: ACTIVE
+"""
+
+        asyncio.run(self._send_async(message))
+
+    # ==========================
+    # CLOSE TRADE
+    # ==========================
+
+    def close_trade(self, trade_id, exit_price):
+        cursor = self.db.conn.cursor()
+        cursor.execute("SELECT side, entry FROM trades WHERE id=?", (trade_id,))
+        row = cursor.fetchone()
+        if not row:
+            return
+
+        side, entry = row
+        pnl = self.calculate_pnl(side, entry, exit_price)
+        self.db.update_trade_status(trade_id, "closed", pnl)
+
