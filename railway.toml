@@ -1,0 +1,45 @@
+# APEX SIGNAL™ - Railway Deployment Configuration
+
+[build]
+builder = "DOCKERFILE"
+
+[deploy]
+startCommand = "python main.py"
+restartPolicyType = "ALWAYS"
+healthcheckPath = "/healthz"
+healthcheckTimeout = 10000
+restartDelaySec = 5
+
+[env]
+PYTHONUNBUFFERED = "1"
+PYTHONPATH = "/app"
+PORT = "8000"
+
+# ============================================================================
+# REQUIRED ENVIRONMENT VARIABLES (set in Railway dashboard)
+# ============================================================================
+
+# Telegram Integration (required for live signal notifications)
+# TELEGRAM_BOT_TOKEN=
+# TELEGRAM_CHAT_ID=
+
+# ============================================================================
+# OPTIONAL ENVIRONMENT VARIABLES (set in Railway dashboard as needed)
+# ============================================================================
+
+# Capital Management (default: 50)
+# CAPITAL=50
+
+# Risk Per Trade (default: 1.5%)
+# RISK_PERCENT=1.5
+
+# Log Level (DEBUG, INFO, WARNING, ERROR - default: INFO)
+# LOG_LEVEL=INFO
+
+# Trading API Keys (optional - for live trading)
+# ALPACA_API_KEY=
+# ALPACA_SECRET_KEY=
+# POLYGON_API_KEY=
+
+# Database (optional - for persistent storage)
+# DATABASE_URL=

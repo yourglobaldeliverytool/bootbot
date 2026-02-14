@@ -1,0 +1,99 @@
+{
+  "name": "APEX SIGNAL™",
+  "description": "Production-grade AI trading signal bot with multi-source price verification",
+  "version": "3.0.0",
+  "build_date": "2026-02-14T13:00:00Z",
+  "git_commit": "production-hardened",
+  "git_branch": "fix/docker-health-and-tests",
+  "author": "APEX SIGNAL Development Team",
+  "license": "PROPRIETARY",
+  "mode": "LIVE_SIGNAL",
+  "features": {
+    "strategies": 18,
+    "indicators": 22,
+    "data_sources": 7,
+    "connectors": [
+      "alpaca",
+      "polygon",
+      "yahoo_finance",
+      "coingecko",
+      "coincap",
+      "metals_live",
+      "tradingview"
+    ],
+    "notifications": [
+      "telegram"
+    ]
+  },
+  "capabilities": {
+    "multi_source_price_verification": true,
+    "sha256_checksums": true,
+    "dynamic_confidence_calculation": true,
+    "atr_based_tp_sl": true,
+    "railway_deployment_ready": true,
+    "health_check_endpoint": true,
+    "safe_mode_without_secrets": true,
+    "professional_telegram_formatting": true,
+    "branded_messaging": true,
+    "confluence_scoring": true,
+    "session_filters": true,
+    "volatility_regime_filter": true
+  },
+  "risk_management": {
+    "default_capital": 50,
+    "default_risk_per_trade": 1.5,
+    "atr_multiplier_tp": 2.0,
+    "atr_multiplier_sl": 1.5,
+    "max_daily_loss": 0.05,
+    "min_risk_reward": 2.0
+  },
+  "trading_pairs": [
+    "BTC/USD",
+    "ETH/USD",
+    "GOLD/USD"
+  ],
+  "safety_features": {
+    "circuit_breaker": true,
+    "rate_limiter": true,
+    "price_deviation_check": true,
+    "graceful_shutdown": true,
+    "config_validation": true,
+    "trading_disabled_without_keys": true,
+    "telegram_disabled_without_credentials": true,
+    "health_check_always_available": true
+  },
+  "integration": {
+    "trading_platform": "Alpaca",
+    "market_data": "Polygon",
+    "messaging": "Telegram",
+    "database": "SQLite (local), PostgreSQL (optional)"
+  },
+  "compatibility": {
+    "python_version": "3.11",
+    "docker_base": "python:3.11-slim",
+    "platform": "linux/amd64"
+  },
+  "deployment": {
+    "primary": "Railway",
+    "secondary": "Docker",
+    "port": 8000,
+    "health_endpoint": "/healthz"
+  },
+  "observability": {
+    "logging": "Structured with branded prefixes",
+    "metrics_endpoint": "/metrics",
+    "status_endpoint": "/status",
+    "api_docs": "/docs"
+  },
+  "branding": {
+    "name": "APEX SIGNAL™",
+    "logo_emoji": "🛡️",
+    "color_theme": "Professional Blue/Gold",
+    "message_template": "Branded institutional format"
+  },
+  "testing": {
+    "import_verification": "test_env.py",
+    "system_tests": "tests/test_system_stabilized.py",
+    "validation_checklist": "COMPLETED"
+  }
+}

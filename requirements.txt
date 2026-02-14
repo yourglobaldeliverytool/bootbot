@@ -1,0 +1,73 @@
+# APEX SIGNAL™ - Production Requirements
+# All dependencies pinned to versions known to build cleanly on python:3.11-slim
+# No build-essential or compiler toolchains required
+
+# ============================================================================
+# CORE DEPENDENCIES (Critical - must install successfully)
+# ============================================================================
+
+# Data processing - pinned to stable releases with wheel support
+pandas==2.1.4
+numpy==1.26.3
+
+# Configuration and data serialization
+PyYAML==6.0.1
+python-dotenv==1.0.0
+
+# HTTP client with async support
+requests==2.31.0
+aiohttp==3.9.1
+
+# Async runtime (built into Python 3.11, but explicit for clarity)
+# asyncio is part of Python standard library - no package needed
+
+# ============================================================================
+# WEB SERVER (FastAPI for REST API and health endpoints)
+# ============================================================================
+
+# FastAPI and ASGI server - production-grade web framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+python-multipart==0.0.6
+
+# ============================================================================
+# TRADING & MARKET DATA (Required for live trading)
+# ============================================================================
+
+# Alpaca Trading API (for live crypto/stock trading)
+alpaca-trade-api==3.2.0
+
+# Polygon API (for market data)
+polygon-api-client==1.13.7
+
+# ============================================================================
+# TELEGRAM NOTIFICATIONS (Required for live signals)
+# ============================================================================
+
+# Telegram Bot API (for Telegram notifications)
+python-telegram-bot==20.7
+
+# ============================================================================
+# OPTIONAL DEPENDENCIES (for additional features)
+# ============================================================================
+# Uncomment these if you need additional data sources
+
+# CCXT (crypto exchange library - alternative data source)
+# ccxt==4.1.72
+
+# SQLAlchemy (for advanced database support)
+# sqlalchemy==2.0.25
+
+# Prometheus (for metrics export)
+# prometheus-client==0.19.0
+
+# ============================================================================
+# NOTES ON DEPENDENCIES
+# ============================================================================
+# - All packages above have pre-built wheels for Linux
+# - No compilation required - installs quickly on python:3.11-slim
+# - Remove comments from optional packages if you need those features
+# - Run: pip install --no-cache-dir -r requirements.txt
+# - For full functionality with all data sources:
+#   pip install --no-cache-dir -r requirements.txt
+#   pip install --no-cache-dir ccxt sqlalchemy prometheus-client

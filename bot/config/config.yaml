@@ -1,0 +1,114 @@
+# APEX SIGNAL™ - Production Configuration
+
+# Capital Management
+# Note: Capital can be overridden by CAPITAL environment variable (Railway)
+capital:
+  default: 50  # Default capital in USD (updated from $15 to $50 per requirements)
+  configurable: true
+
+# Risk Management
+risk_management:
+  risk_per_trade: 0.015  # 1.5% risk per trade
+  max_daily_loss: 0.05   # 5% maximum daily loss
+  atr_multiplier_tp: 2.0 # TP = 2x ATR
+  atr_multiplier_sl: 1.5 # SL = 1.5x ATR
+
+# Market Scanning
+symbols:
+  - BTCUSDT
+  - ETHUSDT
+  - XAUUSD
+  # Add more symbols as needed
+
+scan_interval: 60  # seconds between scans
+
+# Confidence Calculation
+confidence:
+  min_signal_confidence: 0.0  # All signals are sent (confidence is informational)
+  strategy_alignment_weight: 0.5  # 50% weight for strategy alignment
+  indicator_confirmation_weight: 0.3  # 30% weight for indicator confirmation
+  trend_strength_weight: 0.2  # 20% weight for trend strength
+
+# Active Strategies
+strategies:
+  trend_following:
+    enabled: true
+    parameters:
+      fast_period: 20
+      slow_period: 50
+      signal_type: price_ma
+  
+  mean_reversion:
+    enabled: true
+    parameters:
+      period: 20
+      std_threshold: 2.0
+  
+  breakout:
+    enabled: false
+    parameters:
+      period: 20
+      threshold: 0.02
+
+# Active Indicators
+indicators:
+  sma:
+    enabled: true
+    parameters:
+      period: 20
+  
+  ema:
+    enabled: true
+    parameters:
+      period: 20
+  
+  # Note: EMA with period 50 is configured in ema indicator
+  
+  rsi:
+    enabled: true
+    parameters:
+      period: 14
+  
+  macd:
+    enabled: true
+    parameters:
+      fast_period: 12
+      slow_period: 26
+      signal_period: 9
+  
+  atr:
+    enabled: true
+    parameters:
+      period: 14
+
+# Logging Configuration
+logging:
+  level: INFO
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# Data Source Configuration
+data:
+  primary_source: alpaca
+  secondary_source: coingecko
+  max_price_deviation: 0.015  # 1.5% maximum deviation (updated from 0.05% to prevent false positives)
+
+# Notification Settings
+notifications:
+  telegram:
+    # These are loaded from environment variables:
+    # TELEGRAM_BOT_TOKEN
+    # TELEGRAM_CHAT_ID
+    enable_emoji: true
+    enable_checksum: true
+
+# Railway Deployment
+railway:
+  health_check_interval: 30  # seconds
+  restart_policy: always
+  max_restarts: 10
+
+# Monitoring
+monitoring:
+  heartbeat_interval: 60  # seconds
+  inactivity_timeout: 300  # seconds before alert
+  enable_watchdog: true

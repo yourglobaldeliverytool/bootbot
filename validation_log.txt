@@ -1,0 +1,91 @@
+
+[92m======================================================================[0m
+[92m🛡️  APEX SIGNAL™ - Production Validation Script[0m
+[92m======================================================================[0m
+
+Timestamp: 2026-02-14T15:53:45.868218Z
+
+
+[94m======================================================================[0m
+[94mVALIDATION: Import Resolution[0m
+[94m======================================================================[0m
+[92m✅ PASS[0m: Import verification test
+
+[94m======================================================================[0m
+[94mVALIDATION: Circular Imports[0m
+[94m======================================================================[0m
+[92m✅ PASS[0m: No circular imports detected
+
+[94m======================================================================[0m
+[94mVALIDATION: Requirements[0m
+[94m======================================================================[0m
+[92m✅ PASS[0m: Critical dependencies present
+
+[94m======================================================================[0m
+[94mVALIDATION: Configuration[0m
+[94m======================================================================[0m
+[92m✅ PASS[0m: Configuration validation
+   Mode: LIVE_SIGNAL, Trading: True, Telegram: True
+
+[94m======================================================================[0m
+[94mVALIDATION: Strategy Initialization[0m
+[94m======================================================================[0m
+[92m✅ PASS[0m: Strategy loading
+   18 strategies loaded
+
+[94m======================================================================[0m
+[94mVALIDATION: Indicator Initialization[0m
+[94m======================================================================[0m
+[92m✅ PASS[0m: Indicator loading
+   22 indicators loaded
+
+[94m======================================================================[0m
+[94mVALIDATION: Metadata[0m
+[94m======================================================================[0m
+[92m✅ PASS[0m: Metadata validation
+   APEX SIGNAL™ v3.0.0
+
+[94m======================================================================[0m
+[94mVALIDATION: Dockerfile[0m
+[94m======================================================================[0m
+[92m✅ PASS[0m: Dockerfile validation
+
+[94m======================================================================[0m
+[94mVALIDATION: Environment Template[0m
+[94m======================================================================[0m
+[92m✅ PASS[0m: Environment template
+   All critical variables documented
+
+[94m======================================================================[0m
+[94mVALIDATION: Telegram Notifier[0m
+[94m======================================================================[0m
+[92m✅ PASS[0m: Telegram notifier
+   All branded templates present
+
+[94m======================================================================[0m
+[94mVALIDATION: System Tests[0m
+[94m======================================================================[0m
+[92m✅ PASS[0m: System tests
+   Core tests passed (mode detection varies)
+
+[94m======================================================================[0m
+[94mVALIDATION SUMMARY[0m
+[94m======================================================================[0m
+[92m✅ PASS[0m: Import Resolution
+[92m✅ PASS[0m: Circular Imports
+[92m✅ PASS[0m: Requirements
+[92m✅ PASS[0m: Configuration
+[92m✅ PASS[0m: Strategy Initialization
+[92m✅ PASS[0m: Indicator Initialization
+[92m✅ PASS[0m: Metadata
+[92m✅ PASS[0m: Dockerfile
+[92m✅ PASS[0m: Environment Template
+[92m✅ PASS[0m: Telegram Notifier
+[92m✅ PASS[0m: System Tests
+
+[94mTotal: 11/11 validations passed[0m
+
+[92m======================================================================[0m
+[92m🎉 ALL VALIDATIONS PASSED - READY FOR PRODUCTION[0m
+[92m======================================================================[0m
+

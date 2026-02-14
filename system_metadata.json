@@ -1,0 +1,58 @@
+{
+  "name": "APEX SIGNAL™",
+  "description": "Production-grade AI trading signal bot with multi-source price verification",
+  "version": "3.0.0",
+  "build_date": "2026-02-14",
+  "git_commit": "production-hardened",
+  "mode": "VERIFIED_TEST",
+  "features": {
+    "strategies": 18,
+    "indicators": 22,
+    "data_sources": 7,
+    "connectors": [
+      "alpaca",
+      "polygon",
+      "yahoo_finance",
+      "coingecko",
+      "coincap",
+      "metals_live",
+      "tradingview"
+    ]
+  },
+  "capabilities": {
+    "multi_source_price_verification": true,
+    "sha256_checksums": true,
+    "dynamic_confidence_calculation": true,
+    "atr_based_tp_sl": true,
+    "railway_deployment_ready": true,
+    "health_check_endpoint": true,
+    "safe_mode_without_secrets": true,
+    "professional_telegram_formatting": true
+  },
+  "risk_management": {
+    "default_capital": 50,
+    "default_risk_per_trade": 1.5,
+    "atr_multiplier_tp": 2.0,
+    "atr_multiplier_sl": 1.5,
+    "max_daily_loss": 0.05
+  },
+  "safety_features": {
+    "circuit_breaker": true,
+    "rate_limiter": true,
+    "price_deviation_check": true,
+    "graceful_shutdown": true,
+    "config_validation": true,
+    "trading_disabled_without_keys": true,
+    "telegram_disabled_without_credentials": true
+  },
+  "compatibility": {
+    "python_version": "3.11",
+    "docker_base": "python:3.11-slim",
+    "platform": "linux/amd64"
+  },
+  "maintenance": {
+    "contact": "support@apexsignal.ai",
+    "documentation": "README.md",
+    "changelog": "CHANGELOG.md"
+  }
+}
